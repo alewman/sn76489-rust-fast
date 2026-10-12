@@ -52,6 +52,7 @@ FAULTS = {
     # that group's phase 2 is an equivalent mutant: in steady state the noise never
     # shifts there.)
     "fast-sample-a-group-early": ("if clock & 15 == 14 {", "if clock & 15 == 10 {"),
+    "fast-round-pairs-tone-1-with-counter-2": ("            0x11 => 1,\n", "            0x11 => 2,\n"),
     # Dropping run()'s `self.clock & 3 == 2` is an equivalent mutant from power-on:
     # it guards only a host that sets p1 and p2 itself.
 }

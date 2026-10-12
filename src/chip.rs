@@ -457,7 +457,7 @@ impl SN76489 {
             if p2_latch != 0 {
                 self.phase2::<false>();
             } else {
-                self.phase1::<false>();
+                self.phase1::<false, 0>();
             }
         }
         self.clock += 1;
@@ -484,10 +484,14 @@ impl SN76489 {
     ///
     /// Power-on leaves the prescaler at that alignment and nothing but /IC moves it;
     /// a host that sets `p1` and `p2` itself runs clock by clock instead.
-    fn groups(&mut self, count: u64) {
+    fn groups(&mut self, mut count: u64) {
+        if self.clock & 15 == 2 && self.chan_sel == 0x88 && self.rot == 0 {
+            self.rounds(count / 4);
+            count %= 4;
+        }
         let mut clock = self.clock;
         for _ in 0..count {
-            self.phase1::<true>();
+            self.phase1::<true, 0>();
             if clock & 15 == 14 {
                 let now = self.attenuations();
                 self.levels.push(now);
@@ -496,6 +500,27 @@ impl SN76489 {
             clock += 4;
         }
         self.clock = clock;
+    }
+
+    /// `count` rounds of sixteen clocks, four groups, from `clock & 15` = 2 with
+    /// `chan_sel` = $88 and `rot` = 0, where power-on leaves steady state: the four
+    /// groups then select the noise period, tone 1's, tone 2's and tone 3's, against
+    /// counters 0 to 3, the same every round, so each `phase1` is compiled with its
+    /// selection known. The sample comes after the fourth group's `phase1`.
+    fn rounds(&mut self, count: u64) {
+        for _ in 0..count {
+            self.phase1::<true, 0x88>();
+            self.phase2::<true>();
+            self.phase1::<true, 0x11>();
+            self.phase2::<true>();
+            self.phase1::<true, 0x22>();
+            self.phase2::<true>();
+            self.phase1::<true, 0x44>();
+            let now = self.attenuations();
+            self.levels.push(now);
+            self.phase2::<true>();
+        }
+        self.clock += count * 16;
     }
 
     /// The latched byte into the register the channel latch names (ympsg.c
@@ -533,9 +558,11 @@ impl SN76489 {
     /// together on the step that serves tone 1.
     ///
     /// `SETTLED`: called from [`SN76489::groups`], where `ic_latch2` is known to be
-    /// zero, so the compiler drops the /IC paths.
+    /// zero, so the compiler drops the /IC paths. `SEL`, when not 0, is `chan_sel`
+    /// known in advance (from [`SN76489::rounds`]), with `rot` the counter that
+    /// steady state pairs with it, so the period's selection folds away.
     #[inline(always)]
-    fn phase1<const SETTLED: bool>(&mut self) {
+    fn phase1<const SETTLED: bool, const SEL: u32>(&mut self) {
         let ic_latch2 = if SETTLED { 0 } else { self.ic_latch2 };
         let noise_data = self.noise_data;
         // The noise generator follows tone 3's sign in shift rate 3, its own counter's
@@ -552,7 +579,8 @@ impl SN76489 {
         }
         self.noise_of = noise_of;
 
-        let chan_sel = if ic_latch2 & 2 != 0 { 0 } else { self.chan_sel };
+        let current = if SEL != 0 { SEL } else { self.chan_sel };
+        let chan_sel = if ic_latch2 & 2 != 0 { 0 } else { current };
         let mut period = 0;
         if chan_sel & 1 != 0 {
             period = self.freq[0];
@@ -576,7 +604,13 @@ impl SN76489 {
             self.sign = 0;
         }
         self.counter_of = (self.counter_of << 1) & 0xFF;
-        let rot = self.rot as usize;
+        let rot = match SEL {
+            0x88 => 0,
+            0x11 => 1,
+            0x22 => 2,
+            0x44 => 3,
+            _ => self.rot as usize,
+        };
         let mut counter = self.counter[rot];
         if counter >= period {
             self.counter_of |= 1;
@@ -587,12 +621,12 @@ impl SN76489 {
         }
         self.counter[rot] = (counter + 1) & 0x3FF;
         // The one-hot rotation: a 1 is fed in when the three tone places are clear.
-        let feed = if ic_latch2 & 1 != 0 || self.chan_sel & 7 != 0 {
+        let feed = if ic_latch2 & 1 != 0 || current & 7 != 0 {
             0
         } else {
             1
         };
-        self.chan_sel = ((self.chan_sel << 1) | feed) & 0xFF;
+        self.chan_sel = ((current << 1) | feed) & 0xFF;
         self.ic_latch2 = ((ic_latch2 << 1) | self.ic) & 0xFF;
         self.noise_trig_l = self.noise_trig;
     }
