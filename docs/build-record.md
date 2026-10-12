@@ -67,8 +67,8 @@ curves), which rungs 3 and 5 cannot see by design.
 
 ## The fork (sn76489-rust-fast)
 
-2026-10-12. Aubrey: "go ahead with sn76489-rust-fast", after megadrive-rust-fast's
-profile put the PSG at 7% of a Mega Drive frame (14% in Overdrive 2).
+2026-10-12, started after megadrive-rust-fast's profile put the PSG at 7% of a Mega
+Drive frame (14% in Overdrive 2).
 
 - **Fork point `66de73b`.** sn76489-rust `c5fc09e`, the package renamed, the crate
   name kept. The reference was fetched from the local sn76489-python clone at the

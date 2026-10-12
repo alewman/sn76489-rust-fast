@@ -9,8 +9,16 @@ optimization is one commit with its measurement. A change that does not pay is
 reverted and recorded as not kept.
 
 The crate keeps the name `sn76489_rust` and sn76489-rust's API, so a board written
-for sn76489-rust takes this one with
-`sn76489-rust = { package = "sn76489-rust-fast", ... }` and no other change.
+for sn76489-rust takes this one by changing only its dependency:
+
+```toml
+sn76489-rust = { package = "sn76489-rust-fast", git = "https://github.com/alewman/sn76489-rust-fast", rev = "..." }
+```
+
+To reproduce the gate: `scripts/fetch_sn76489python.sh` (the pinned reference, into
+`external/`), then `scripts/ladder.sh`. Rung 4 and three of the benchmark's workloads
+use board streams exported from ROMs, which are not in the repository; without them
+`SKIP4=1 scripts/ladder.sh` runs the rest.
 
 ## The gate
 
@@ -45,11 +53,11 @@ refuses a result whose checks differ. The ratio is the result.
 | Commit | Change | Ratio (min over layouts) |
 | --- | --- | ---: |
 | `66de73b` | the fork point: sn76489-rust's transcription, with the harness | -- |
-| `5124c76` | a settled chip (/IC out of both shift registers, no write in flight) runs four clocks at a time: `phase1::<true>` and `phase2::<true>`, the same code with the /IC and write paths compiled out | x1.776 |
-| `6d3bab0` | whole 16-clock rounds with `chan_sel` and its counter known, since in steady state they are the same at the same point of every round | x1.063 |
-| | **at `6d3bab0` against `66de73b`** | **x1.910** |
+| `82edcd4` | a settled chip (/IC out of both shift registers, no write in flight) runs four clocks at a time: `phase1::<true>` and `phase2::<true>`, the same code with the /IC and write paths compiled out | x1.776 |
+| `ca71bf4` | whole 16-clock rounds with `chan_sel` and its counter known, since in steady state they are the same at the same point of every round | x1.063 |
+| | **at `ca71bf4` against `66de73b`** | **x1.910** |
 
-At `6d3bab0`, best of 10 on pinned core 31, 2026-10-12: the random walk 151x real
+At `ca71bf4`, best of 10 on pinned core 31, 2026-10-12: the random walk 151x real
 time (68x at the fork point), the three cartridges 109-110x (57x).
 
 **Measured and not kept:**
@@ -60,8 +68,9 @@ time (68x at the fork point), the three cartridges 109-110x (57x).
 - `#[inline(always)]` on `shift` and `attenuations`: x0.991.
 - Reserving the samples' room before the rounds: x1.004.
 
-**In a Mega Drive.** megadrive-rust-fast (at `e18bdd1`) was built against this crate
-(`6d3bab0`) in a separate worktree and timed against its own build, 600 frames,
+**In a Mega Drive.** megadrive-rust-fast (a speed fork of
+[megadrive-rust](https://github.com/alewman/megadrive-rust), at `e18bdd1`) was built against this crate
+(`ca71bf4`) in a separate worktree and timed against its own build, 600 frames,
 alternately on one core, best of 5:
 
 | Workload | Board with sn76489-rust | With this fork | Ratio |
