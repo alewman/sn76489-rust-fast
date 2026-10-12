@@ -1,11 +1,11 @@
 [package]
-name = "sn76489-rust"
+name = "sn76489-rust-fast"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "A Rust SN76489 PSG core transcribed from, and proven equivalent to, sn76489-python"
+description = "A fast fork of sn76489-rust, kept equivalent to sn76489-python at every input clock"
 license = "MIT"
-repository = "https://github.com/alewman/sn76489-rust"
+repository = "https://github.com/alewman/sn76489-rust-fast"
 publish = false
 
 [lib]

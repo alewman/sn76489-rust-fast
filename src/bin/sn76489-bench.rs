@@ -1,39 +1,55 @@
-//! `sn76489-bench [--seconds S] [--repeat N] [--variants a,b] <manifest.json>`: input
-//! clocks per second and the fraction of real time, measured as the reference's
-//! `benchmarks/bench.py` measures it.
+//! `sn76489-bench [--seconds S] [--repeat N] [--chunk C] <manifest.json>...`: the
+//! time each manifest takes, best of `--repeat`, and their total.
 //!
-//! The manifest's writes are driven through `run()` as a board drives the chip --
-//! run to each write, write, and at the end take the samples -- for its first
-//! `--seconds` of emulated time, in each of `--variants` (the YM7101 and the Game
-//! Gear by default, the reference's pair). `scripts/bench.sh` makes the workload, the
-//! reference's stream: the seed-1 random walk of 40,000 latches. Real time is
-//! 3,579,545 input clocks a second (NTSC). Reports the best of `--repeat` runs, since
-//! the machine is shared.
+//! Each manifest runs in its own variant, for its first `--seconds` of emulated time,
+//! driven as a board drives the chip: `run()` up to each write and otherwise in
+//! pieces of at most `--chunk` input clocks (a board syncs the PSG on every sound
+//! access and at least once a scanline: 228 clocks on the Mega Drive), then the
+//! samples taken as levels. `check` hashes every workload's samples, so an A/B can
+//! confirm both sides made the same sound. Real time is 3,579,545 input clocks a
+//! second (NTSC). The machine is shared, so best-of recovers the undisturbed rate.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::hint::black_box;
 use std::process::ExitCode;
 use std::time::Instant;
 
 use sn76489_rust::conformance::{load_manifest, variant, Kind, Manifest};
-use sn76489_rust::{PSGVariant, SN76489};
+use sn76489_rust::SN76489;
 
 const REAL_TIME: f64 = 3_579_545.0;
 
-fn run(manifest: &Manifest, clocks: u64, variant: PSGVariant) -> f64 {
-    let mut chip = SN76489::new(variant);
+fn run_to(chip: &mut SN76489, until: u64, chunk: u64) {
+    while chip.clock < until {
+        chip.run((until - chip.clock).min(chunk));
+    }
+}
+
+/// One timed run: the seconds it took and a hash of its samples.
+fn run(manifest: &Manifest, clocks: u64, chunk: u64) -> (f64, u64) {
+    let mut chip = SN76489::new(variant(&manifest.variant).expect("checked by the loader"));
+    let mut samples = Vec::new();
     let started = Instant::now();
     for event in &manifest.events {
         if event.t >= clocks {
             break;
         }
-        if event.kind == Kind::Write {
-            chip.run(event.t - chip.clock);
-            chip.write(event.data);
+        run_to(&mut chip, event.t, chunk);
+        match event.kind {
+            Kind::Write => chip.write(event.data),
+            Kind::Stereo => chip.write_stereo(event.data),
+            Kind::Test => chip.write_test(event.data),
         }
     }
-    chip.run(clocks - chip.clock);
-    black_box(chip.take_samples());
-    started.elapsed().as_secs_f64()
+    run_to(&mut chip, clocks, chunk);
+    samples.extend(chip.take_samples());
+    let elapsed = started.elapsed().as_secs_f64();
+    let mut hasher = DefaultHasher::new();
+    for (left, right) in black_box(&samples) {
+        left.to_bits().hash(&mut hasher);
+        right.to_bits().hash(&mut hasher);
+    }
+    (elapsed, hasher.finish())
 }
 
 fn main() -> ExitCode {
@@ -46,35 +62,45 @@ fn main() -> ExitCode {
     };
     let seconds: f64 = take("--seconds")
         .and_then(|v| v.parse().ok())
-        .unwrap_or(2.0);
-    let repeat: usize = take("--repeat").and_then(|v| v.parse().ok()).unwrap_or(10);
-    let names = take("--variants").unwrap_or_else(|| "ym7101,game-gear".into());
-    let variants: Option<Vec<PSGVariant>> = names.split(',').map(variant).collect();
-    let (Some(variants), [path]) = (variants, args.as_slice()) else {
-        eprintln!(
-            "usage: sn76489-bench [--seconds S] [--repeat N] [--variants a,b] <manifest.json>"
-        );
+        .unwrap_or(10.0);
+    let repeat: usize = take("--repeat").and_then(|v| v.parse().ok()).unwrap_or(5);
+    let chunk: u64 = take("--chunk")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(228)
+        .max(1);
+    if args.is_empty() {
+        eprintln!("usage: sn76489-bench [--seconds S] [--repeat N] [--chunk C] <manifest.json>...");
         return ExitCode::from(2);
-    };
-    let manifest = match load_manifest(path) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::from(2);
+    }
+    let mut total = 0.0;
+    let mut check = DefaultHasher::new();
+    for path in &args {
+        let manifest = match load_manifest(path) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                eprintln!("error: {path}: {error}");
+                return ExitCode::from(2);
+            }
+        };
+        let clocks = ((REAL_TIME * seconds) as u64).min(manifest.clocks);
+        let mut best = f64::INFINITY;
+        let mut hash = 0;
+        for _ in 0..repeat {
+            let (elapsed, h) = run(&manifest, clocks, chunk);
+            best = best.min(elapsed);
+            hash = h;
         }
-    };
-    let clocks = (REAL_TIME * seconds) as u64;
-    println!("{}, {clocks} clocks, best of {repeat}", manifest.name);
-    for variant in variants {
-        let best = (0..repeat)
-            .map(|_| run(&manifest, clocks, variant))
-            .fold(f64::INFINITY, f64::min);
+        hash.hash(&mut check);
+        total += best;
         let rate = clocks as f64 / best;
         println!(
-            "  {:10} {rate:>14.0} clocks/s  {:8.2}x real time  ({best:.4} s)",
-            variant.name,
+            "  {:54} {:>10} clocks  {:8.1}x real time  ({best:.4} s)  {hash:016x}",
+            manifest.name,
+            clocks,
             rate / REAL_TIME
         );
     }
+    println!("check {:016x}", check.finish());
+    println!("total {total:.4} s");
     ExitCode::SUCCESS
 }

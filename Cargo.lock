@@ -75,7 +75,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sn76489-rust"
+name = "sn76489-rust-fast"
 version = "0.1.0"
 dependencies = [
  "serde_json",
