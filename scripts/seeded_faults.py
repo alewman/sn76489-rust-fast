@@ -7,8 +7,8 @@ check that the ladder catches every break.
 Each fault is one textual change to ``src/chip.rs``, applied to a copy of the
 repository under ``external/faults/<name>/`` (the working tree is never touched) and
 judged first by ``cargo test --release --test conformance``: the ten examples against
-the reference's traces. A fault the examples miss is then run through rung 1 (the
-tables and ``take_samples()``), rung 3 and rung 5 (``external/manifests/synthetic``
+the reference's traces, and run in long pieces against one clock at a time. A fault the examples miss is then run through rung 1 (the
+tables and ``take_samples()``), rung 3, rung 5 and rung 6 (``external/manifests/synthetic``
 and ``random``, written by ``scripts/rung3.sh`` and ``scripts/rung5.sh``; the
 reference must be fetched), and what each finds is reported. sn76489-python's
 ``scripts/mutation.py`` records the examples' own gap: the curves and the stereo
@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 #: name -> (text in src/chip.rs, replacement). Each text must occur exactly once.
 FAULTS = {
-    "write-never-early": ("        if self.write_flag_l {\n            self.update_registers();\n        }\n        self.rot", "        self.rot"),
+    "write-never-early": ("        if !SETTLED && self.write_flag_l {\n            self.update_registers();\n        }\n        self.rot", "        self.rot"),
     "counter-compares-greater": ("if counter >= period {", "if counter > period {"),
     "noise-periods-doubled": ("[0x10, 0x20, 0x40]", "[0x20, 0x40, 0x80]"),
     "noise-follows-tone-2": ("            (self.sign >> 1) & 1\n", "            (self.sign >> 2) & 1\n"),
@@ -43,6 +43,17 @@ FAULTS = {
     "stereo-sides-swapped": ("if stereo & (0x10 << channel) != 0 {\n                        left", "if stereo & (0x01 << channel) != 0 {\n                        left"),
     "ym7101-curve-one-entry": ("0.382, 0.29", "0.383, 0.29"),
     "ideal-curve-1-5-db": ("10f64.powf(-0.1 * step as f64)", "10f64.powf(-0.075 * step as f64)"),
+    # The fork's own paths, which only long run() calls take: the examples' chunked
+    # test and rung 6 must catch them.
+    "fast-settled-ignores-latched-write": ("&& !self.write_flag && !self.write_flag_l", "&& !self.write_flag"),
+    "fast-settled-ignores-ic-latch2": ("self.ic | self.ic_latch1 | self.ic_latch2 == 0", "self.ic | self.ic_latch1 == 0"),
+    # Settled groups start at clock & 15 = 2, 6, 10 or 14, so the sample falls
+    # after phase 1 of the 14 group; this takes it a group early. (Taking it after
+    # that group's phase 2 is an equivalent mutant: in steady state the noise never
+    # shifts there.)
+    "fast-sample-a-group-early": ("if clock & 15 == 14 {", "if clock & 15 == 10 {"),
+    # Dropping run()'s `self.clock & 3 == 2` is an equivalent mutant from power-on:
+    # it guards only a host that sets p1 and p2 itself.
 }
 
 
@@ -61,7 +72,7 @@ def judge(name: str, old: str, new: str) -> tuple[str, bool, str]:
         return name, False, f"fault text found {text.count(old)} times"
     chip.write_text(text.replace(old, new))
     result = subprocess.run(
-        ["nice", "cargo", "test", "--release", "-q", "--test", "conformance", "every_example"],
+        ["nice", "cargo", "test", "--release", "-q", "--test", "conformance"],
         cwd=copy,
         capture_output=True,
         text=True,
@@ -98,6 +109,13 @@ def escalate(copy: Path) -> str:
         )
         total = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else result.stderr.strip()
         found.append(f"{rung}: {total.replace('TOTAL: ', '')}")
+    rung6 = subprocess.run(
+        [str(ROOT / "scripts" / "rung6.sh")],
+        env={**os.environ, "CHUNKS_BIN": str(bins / "sn76489-chunks"), "JOBS": "4"},
+        capture_output=True,
+        text=True,
+    )
+    found.append("rung 6: " + (rung6.stdout.strip().splitlines() or ["no output"])[-1].replace("TOTAL: ", ""))
     return "; ".join(found)
 
 

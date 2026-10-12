@@ -22,4 +22,5 @@ rung 2
 rung 3
 rung 5
 [ "${SKIP4:-0}" = 1 ] || rung 4
+rung 6
 echo "ladder clean in $(( $(date +%s) - start )) s"

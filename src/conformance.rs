@@ -221,3 +221,75 @@ pub fn trace_manifest(manifest: &Manifest, out: &mut impl Write) -> io::Result<(
         chip.clock / CLOCKS_PER_SAMPLE
     )
 }
+
+/// Rung 6: run `manifest` twice, once a clock at a time as the trace does and once in
+/// pieces of seeded random length (one clock to thousands, and always to each event,
+/// as a board runs the chip), and check that the second leaves the first's state at
+/// every boundary and the same samples, to the bit. The ladder's other rungs judge
+/// the first against the reference, so this carries their result over to long runs.
+/// Returns the boundaries checked.
+pub fn check_chunked(manifest: &Manifest, seed: u64) -> Result<u64, String> {
+    let variant = variant(&manifest.variant).expect("checked when loaded");
+    let mut single = SN76489::new(variant);
+    let mut chunked = SN76489::new(variant);
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut length = move || {
+        // xorshift64*: pieces short, middling and long in equal measure
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        let r = state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32;
+        1 + match r % 3 {
+            0 => r / 3 % 20,
+            1 => r / 3 % 400,
+            _ => r / 3 % 20_000,
+        }
+    };
+    let mut boundaries = 0;
+    let mut checked = 0;
+    let mut advance = |single: &mut SN76489, chunked: &mut SN76489, checked: &mut usize, t: u64| {
+        while chunked.clock < t {
+            chunked.run(length().min(t - chunked.clock));
+            while single.clock < chunked.clock {
+                single.run(1);
+            }
+            if !chunked.same_state(single) {
+                return Err(format!(
+                    "{}: state differs at clock {}",
+                    manifest.name, chunked.clock
+                ));
+            }
+            if chunked.levels[*checked..] != single.levels[*checked..] {
+                return Err(format!(
+                    "{}: samples differ by clock {}",
+                    manifest.name, chunked.clock
+                ));
+            }
+            *checked = chunked.levels.len();
+            boundaries += 1;
+        }
+        Ok(())
+    };
+    for event in &manifest.events {
+        advance(&mut single, &mut chunked, &mut checked, event.t)?;
+        for chip in [&mut single, &mut chunked] {
+            match event.kind {
+                Kind::Write => chip.write(event.data),
+                Kind::Stereo => chip.write_stereo(event.data),
+                Kind::Test => chip.write_test(event.data),
+            }
+        }
+        checked = checked.min(chunked.levels.len());
+    }
+    advance(&mut single, &mut chunked, &mut checked, manifest.clocks)?;
+    let bits = |samples: Vec<(f64, f64)>| -> Vec<(u64, u64)> {
+        samples
+            .iter()
+            .map(|(l, r)| (l.to_bits(), r.to_bits()))
+            .collect()
+    };
+    if bits(chunked.take_samples()) != bits(single.take_samples()) {
+        return Err(format!("{}: take_samples() differs", manifest.name));
+    }
+    Ok(boundaries)
+}

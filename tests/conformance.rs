@@ -7,7 +7,9 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::json;
-use sn76489_rust::conformance::{load_manifest, manifest_from_value, trace_manifest};
+use sn76489_rust::conformance::{
+    check_chunked, load_manifest, manifest_from_value, trace_manifest,
+};
 use sn76489_rust::{ideal_levels, GAME_GEAR_PSG, SEGA_VDP_PSG, SN76489, YM7101_PSG};
 
 #[test]
@@ -112,4 +114,26 @@ fn stereo_is_the_game_gears_alone() {
         assert!(left > 0.9, "{}", variant.name);
         assert_eq!(right == 0.0, routed, "{}", variant.name);
     }
+}
+
+#[test]
+fn long_runs_leave_what_single_clocks_leave() {
+    // Rung 6 on the examples, three seeds each: the fork's fast paths only run in
+    // run() calls longer than one clock, which the trace never makes.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/conformance");
+    let mut checked = 0;
+    for entry in fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let manifest = load_manifest(path.to_str().unwrap()).unwrap();
+        for seed in 1..=3 {
+            if let Err(error) = check_chunked(&manifest, seed) {
+                panic!("seed {seed}: {error}");
+            }
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 10);
 }

@@ -288,6 +288,80 @@ impl SN76489 {
         self.levels.clear();
     }
 
+    /// Whether `other` is in the same state, every field but the finished samples
+    /// (`levels`, which a caller compares itself, and those already mixed by a stereo
+    /// change, which `take_samples` returns). Rung 6's check that a long `run()`
+    /// leaves what clocks one at a time leave; the destructuring makes a new field a
+    /// compile error here until it is compared.
+    pub fn same_state(&self, other: &SN76489) -> bool {
+        let SN76489 {
+            variant,
+            lfsr_mask,
+            lfsr_low,
+            lfsr_taps,
+            lfsr_out,
+            level_table,
+            volume,
+            freq,
+            noise_data,
+            stereo,
+            latch,
+            test,
+            counter,
+            counter_of,
+            sign,
+            noise,
+            noise_of,
+            noise_trig,
+            noise_trig_l,
+            noise_sign,
+            chan_sel,
+            rot,
+            p1,
+            p2,
+            ic_latch1,
+            ic_latch2,
+            ic,
+            data,
+            write_flag,
+            write_flag_l,
+            clock,
+            levels: _,
+            mixed: _,
+        } = self;
+        *variant == other.variant
+            && *lfsr_mask == other.lfsr_mask
+            && *lfsr_low == other.lfsr_low
+            && *lfsr_taps == other.lfsr_taps
+            && *lfsr_out == other.lfsr_out
+            && level_table.map(f64::to_bits) == other.level_table.map(f64::to_bits)
+            && *volume == other.volume
+            && *freq == other.freq
+            && *noise_data == other.noise_data
+            && *stereo == other.stereo
+            && *latch == other.latch
+            && *test == other.test
+            && *counter == other.counter
+            && *counter_of == other.counter_of
+            && *sign == other.sign
+            && *noise == other.noise
+            && *noise_of == other.noise_of
+            && *noise_trig == other.noise_trig
+            && *noise_trig_l == other.noise_trig_l
+            && *noise_sign == other.noise_sign
+            && *chan_sel == other.chan_sel
+            && *rot == other.rot
+            && *p1 == other.p1
+            && *p2 == other.p2
+            && *ic_latch1 == other.ic_latch1
+            && *ic_latch2 == other.ic_latch2
+            && *ic == other.ic
+            && *data == other.data
+            && *write_flag == other.write_flag
+            && *write_flag_l == other.write_flag_l
+            && *clock == other.clock
+    }
+
     // -- the ports ------------------------------------------------------------------
 
     /// The data port. Reading it locks up a Mega Drive (CMD `gen-hw.txt` 1) and is
@@ -326,6 +400,28 @@ impl SN76489 {
 
     /// Advance `clocks` input clocks, appending finished samples.
     ///
+    /// Each clock is [`SN76489::tick`], except that once the chip is settled (see
+    /// [`SN76489::groups`]) it runs four clocks at a time: the state and the samples
+    /// at the end are what the clocks one at a time would have left, which rung 6
+    /// checks at every boundary of every manifest.
+    pub fn run(&mut self, clocks: u64) {
+        let end = self.clock + clocks;
+        while self.clock < end {
+            if end - self.clock >= 4
+                && self.p1 == 0
+                && self.p2 == 0
+                && self.clock & 3 == 2
+                && self.settled()
+            {
+                self.groups((end - self.clock) / 4);
+            } else {
+                self.tick();
+            }
+        }
+    }
+
+    /// One input clock.
+    ///
     /// The body is `YMPSG_Clock` (ympsg.c lines 273-306): the /4 prescaler, the /IC
     /// shift register that resets it, then the registers, the channel latch and one
     /// of the two internal phases.
@@ -335,42 +431,69 @@ impl SN76489 {
     /// may be (ympsg.c calls `YMPSG_UpdateRegisters` at line 287 and again at line
     /// 209). So a write that lands on that phase reaches the register a clock earlier
     /// than one that does not.
-    pub fn run(&mut self, clocks: u64) {
+    fn tick(&mut self) {
+        let p2_latch = self.p2;
+        self.p2 = (self.p2 + self.p1) & 1;
+        let mut p1 = self.p1 ^ 1;
+        if self.ic_latch1 == 2 {
+            p1 = 0;
+            self.p2 = 0;
+        }
+        self.p1 = p1;
+        self.ic_latch1 = ((self.ic_latch1 << 1) | self.ic) & 3;
+        if self.write_flag_l {
+            self.update_registers();
+            self.write_flag_l = false;
+        }
+        if self.write_flag {
+            // The channel latch is taken on the clock of the write itself.
+            if self.data & 0x80 != 0 {
+                self.latch = (self.data >> 4) & 7;
+            }
+            self.write_flag = false;
+            self.write_flag_l = true;
+        }
+        if p1 != 0 {
+            if p2_latch != 0 {
+                self.phase2::<false>();
+            } else {
+                self.phase1::<false>();
+            }
+        }
+        self.clock += 1;
+        if self.clock % CLOCKS_PER_SAMPLE == 0 {
+            let now = self.attenuations();
+            self.levels.push(now);
+        }
+    }
+
+    /// Nothing in flight that [`SN76489::groups`] leaves out: /IC released and
+    /// out of both its shift registers, and no write waiting to be taken in.
+    fn settled(&self) -> bool {
+        self.ic | self.ic_latch1 | self.ic_latch2 == 0 && !self.write_flag && !self.write_flag_l
+    }
+
+    /// `count` groups of four clocks from where the prescaler is about to run the
+    /// first internal phase at `clock & 3` = 2, on a settled chip. With /IC
+    /// released the prescaler runs free, so of each four clocks the first runs
+    /// `phase1` and the third `phase2`, and with no write in flight
+    /// [`SN76489::tick`]'s register steps do nothing; what is left is the two phases
+    /// and the sample, which falls two clocks into the group starting at `clock & 15`
+    /// = 14, after its `phase1`. Nothing in a group can unsettle the chip: only a
+    /// write or [`SN76489::reset`] does.
+    ///
+    /// Power-on leaves the prescaler at that alignment and nothing but /IC moves it;
+    /// a host that sets `p1` and `p2` itself runs clock by clock instead.
+    fn groups(&mut self, count: u64) {
         let mut clock = self.clock;
-        for _ in 0..clocks {
-            let p2_latch = self.p2;
-            self.p2 = (self.p2 + self.p1) & 1;
-            let mut p1 = self.p1 ^ 1;
-            if self.ic_latch1 == 2 {
-                p1 = 0;
-                self.p2 = 0;
-            }
-            self.p1 = p1;
-            self.ic_latch1 = ((self.ic_latch1 << 1) | self.ic) & 3;
-            if self.write_flag_l {
-                self.update_registers();
-                self.write_flag_l = false;
-            }
-            if self.write_flag {
-                // The channel latch is taken on the clock of the write itself.
-                if self.data & 0x80 != 0 {
-                    self.latch = (self.data >> 4) & 7;
-                }
-                self.write_flag = false;
-                self.write_flag_l = true;
-            }
-            if p1 != 0 {
-                if p2_latch != 0 {
-                    self.phase2();
-                } else {
-                    self.phase1();
-                }
-            }
-            clock += 1;
-            if clock % CLOCKS_PER_SAMPLE == 0 {
+        for _ in 0..count {
+            self.phase1::<true>();
+            if clock & 15 == 14 {
                 let now = self.attenuations();
                 self.levels.push(now);
             }
+            self.phase2::<true>();
+            clock += 4;
         }
         self.clock = clock;
     }
@@ -408,8 +531,12 @@ impl SN76489 {
     /// register naming whose *period* this step compares against; `rot` names the
     /// counter. The four expiries collected in `counter_of` flip the four signs
     /// together on the step that serves tone 1.
-    fn phase1(&mut self) {
-        let ic_latch2 = self.ic_latch2;
+    ///
+    /// `SETTLED`: called from [`SN76489::groups`], where `ic_latch2` is known to be
+    /// zero, so the compiler drops the /IC paths.
+    #[inline(always)]
+    fn phase1<const SETTLED: bool>(&mut self) {
+        let ic_latch2 = if SETTLED { 0 } else { self.ic_latch2 };
         let noise_data = self.noise_data;
         // The noise generator follows tone 3's sign in shift rate 3, its own counter's
         // otherwise, and shifts on that signal's rising edge.
@@ -488,11 +615,14 @@ impl SN76489 {
 
     /// The second internal phase: the counter index steps and the LFSR's output bit
     /// is latched (`ympsg.c` `YMPSG_ClockInternal2`, lines 201-214).
-    fn phase2(&mut self) {
+    ///
+    /// `SETTLED`: called from [`SN76489::groups`], where no write is in flight.
+    #[inline(always)]
+    fn phase2<const SETTLED: bool>(&mut self) {
         if self.noise_trig_l != 0 {
             self.noise_trig = 0;
         }
-        if self.write_flag_l {
+        if !SETTLED && self.write_flag_l {
             self.update_registers();
         }
         self.rot = (self.rot + 1) & 3;
