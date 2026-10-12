@@ -129,8 +129,8 @@ def main() -> int:
     caught = 0
     for name, failed, detail in results:
         caught += failed
-        print(f"{'caught ' if failed else 'examples missed'} {name}: {detail[:150]}")
-    print(f"{caught} of {len(FAULTS)} faults caught by the examples")
+        print(f"{'caught ' if failed else 'cargo test missed'} {name}: {detail[:150]}")
+    print(f"{caught} of {len(FAULTS)} faults caught by cargo test's conformance tests")
     return 0
 
 
