@@ -1,4 +1,85 @@
-# sn76489-rust
+# sn76489-rust-fast
+
+A fast fork of [sn76489-rust](https://github.com/alewman/sn76489-rust), the Rust
+transcription of [sn76489-python](https://github.com/alewman/sn76489-python), the
+SN76489 PSG in its four Sega variants. It stays provably equivalent to the reference
+at every input clock: the same ladder, every rung, on every commit that touches
+`src/`, plus a rung of its own for the long `run()` calls a board makes. Each
+optimization is one commit with its measurement. A change that does not pay is
+reverted and recorded as not kept.
+
+The crate keeps the name `sn76489_rust` and sn76489-rust's API, so a board written
+for sn76489-rust takes this one with
+`sn76489-rust = { package = "sn76489-rust-fast", ... }` and no other change.
+
+## The gate
+
+`scripts/ladder.sh`, about a minute: `cargo test`, then rungs 1-5 against the
+pinned reference (below, "Certification"), then rung 6.
+
+The reference's trace runs the chip **one clock at a time**, so rungs 1-5 judge only
+`run(1)`. The fork's fast paths run only inside longer calls. **Rung 6**
+(`scripts/rung6.sh`, `conformance::check_chunked`) runs every manifest of rungs 2-5
+twice: clock by clock, and in seeded random pieces of one clock to 20,000 and up to
+each event, as a board runs the chip. It requires the same state at every boundary
+(`same_state`, which destructures the chip, so a new field that is not compared is a
+compile error) and the same samples, to the bit. Rungs 1-5 carry over to long runs
+through it: 175 of 175 manifests, 544,266 boundaries. `cargo test` runs it on the
+ten vendored examples with three seeds, so CI covers the fast paths too.
+
+`scripts/seeded_faults.py` breaks the core one rule at a time. All 18 faults are
+caught: sn76489-rust's 14, and 4 in the fork's paths. Three more fork faults turned
+out to be equivalent mutants; the script notes why rather than counting them.
+
+## Speed
+
+`scripts/bench.sh` drives `run()` as a board does: in pieces of at most a Mega Drive
+scanline (228 input clocks) and up to each write, the first ten emulated seconds of
+four workloads. These are the reference's random walk on the YM7101 and, from the
+ROM-derived board streams (local only), Gunstar Heroes (YM7101), Sonic the Hedgehog
+(Master System) and Columns (Game Gear, stereo). It prints a check over every
+sample. `scripts/ab.sh` builds a base commit and the working tree under three code
+layouts and runs them alternately on one core of the shared i9-13900K, best of 7. It
+refuses a result whose checks differ. The ratio is the result.
+
+| Commit | Change | Ratio (min over layouts) |
+| --- | --- | ---: |
+| `66de73b` | the fork point: sn76489-rust's transcription, with the harness | -- |
+| `5124c76` | a settled chip (/IC out of both shift registers, no write in flight) runs four clocks at a time: `phase1::<true>` and `phase2::<true>`, the same code with the /IC and write paths compiled out | x1.776 |
+| `6d3bab0` | whole 16-clock rounds with `chan_sel` and its counter known, since in steady state they are the same at the same point of every round | x1.063 |
+| | **at `6d3bab0` against `66de73b`** | **x1.910** |
+
+At `6d3bab0`, best of 10 on pinned core 31, 2026-10-12: the random walk 151x real
+time (68x at the fork point), the three cartridges 109-110x (57x).
+
+**Measured and not kept:**
+- Passing over quiet stretches whole: x0.69 on Gunstar. A tone at period 0, the
+  power-on value, expires every round, so a stretch is almost never quiet, and the
+  check cost more than it saved.
+- Fat LTO with one codegen unit: x0.982.
+- `#[inline(always)]` on `shift` and `attenuations`: x0.991.
+- Reserving the samples' room before the rounds: x1.004.
+
+**In a Mega Drive.** megadrive-rust-fast (at `e18bdd1`) was built against this crate
+(`6d3bab0`) in a separate worktree and timed against its own build, 600 frames,
+alternately on one core, best of 5:
+
+| Workload | Board with sn76489-rust | With this fork | Ratio |
+| --- | ---: | ---: | ---: |
+| Sonic the Hedgehog | 1.615 s | 1.533 s | x1.053 |
+| Streets of Rage 2 | 1.340 s | 1.261 s | x1.063 |
+| Gunstar Heroes | 1.658 s | 1.573 s | x1.054 |
+| Overdrive 2 | 1.299 s | 1.132 s | x1.148 |
+| **Total** | 5.912 s | 5.499 s | **x1.075** |
+
+Both boards made the same sound and picture (the checksums match). The board's own
+gate, all 37 lockstep cases at full length against upstream megadrive-rust, is 37 of
+37 identical with this PSG. What is left of the PSG is about 4% of a board frame, so
+further gains here move the board by a percent or two.
+
+The library builds for `wasm32-unknown-unknown` (stable toolchain).
+
+## sn76489-rust, which this forks
 
 A Rust **SN76489** PSG core transcribed from
 [sn76489-python](https://github.com/alewman/sn76489-python) and proven equivalent to
@@ -140,9 +221,12 @@ not a contract.
 - `sn76489-tables`: every variant's data, as rung 1 compares it.
 - `sn76489-samples <manifest>`: `take_samples()` after a manifest, as rung 1
   compares it.
-- `sn76489-bench <manifest>`: the reference's benchmark, through `run()`.
+- `sn76489-bench <manifest>...`: each manifest in its own variant through `run()`,
+  as a board drives it, best of `--repeat`, with a check over the samples
+  (`scripts/bench.sh`).
+- `sn76489-chunks <manifest>...`: rung 6, long runs against single clocks.
 
-## Speed
+## sn76489-rust's speed
 
 `scripts/bench.sh` runs the reference's benchmark: the first two seconds of the seed-1
 random walk (40,000 latches) through `run()`, as a board drives the chip, best of 20.
@@ -158,6 +242,9 @@ Measured on one pinned core of an i9-13900K that other jobs were sharing (load a
 Real time is 3,579,545 input clocks a second (NTSC), so this core is 14 times the
 reference on PyPy. In a whole Mega Drive the PSG is under 1% of one core, against
 about 6% for ym2612-rust-fast's FM chip, so a `-fast` fork is not needed.
+(That was sn76489-rust's estimate. megadrive-rust-fast's profile later put the PSG at
+7% of a board frame, 14% in Overdrive 2, and this fork exists because of it. Its
+own benchmark, above, replaced this one.)
 The library also builds for `wasm32-unknown-unknown` (stable toolchain).
 
 ## Where the brief is

@@ -64,3 +64,42 @@ curves), which rungs 3 and 5 cannot see by design.
   The default toolchain is an old nightly without the wasm target.
 - `scripts/fetch_sn76489python.sh` clones the reference over HTTPS by
   default. `SN76489_PYTHON_SOURCE=/data/emu/sn76489-python` clones the local one.
+
+## The fork (sn76489-rust-fast)
+
+2026-10-12. Aubrey: "go ahead with sn76489-rust-fast", after megadrive-rust-fast's
+profile put the PSG at 7% of a Mega Drive frame (14% in Overdrive 2).
+
+- **Fork point `66de73b`.** sn76489-rust `c5fc09e`, the package renamed, the crate
+  name kept. The reference was fetched from the local sn76489-python clone at the
+  same pin and installed on PyPy 7.3.20. The ladder was clean before any change.
+  `sn76489-bench` was rewritten to take several manifests, each in its own variant,
+  run in scanline-sized pieces, with a check over the samples.
+- **The trace runs one clock at a time.** `conformance::replay` calls `run(1)` for
+  every clock, so no rung of the reference's ladder would ever reach a path that only
+  a long `run()` takes. Rung 6 compares long runs with single clocks over every
+  manifest, including the full state at every boundary. It is the fork's gate for
+  everything it changes. A deliberate off-by-one in the first fast path failed 162 of
+  175 manifests.
+- **Steady state is rigid.** From power-on, with /IC released, the prescaler's
+  four-clock groups start at `clock & 15` = 2, 6, 10, 14. At those points `chan_sel`
+  is $88, $11, $22, $44 and `rot` 0, 1, 2, 3, on every variant. Only /IC moves the
+  prescaler (writes do not), so this holds for the chip's life. Both fast paths
+  check their alignment on entry and otherwise fall back to the slower path.
+- **Equivalent mutants.** Because the alignment is fixed, several plausible faults
+  change nothing. A sample after a 12 group's phase 2 is never taken. Taking the
+  sample before or after the 14 group's phase 2 is the same, since the noise never
+  shifts there. A sample a group early or late within 8-14 is also the same, since
+  the attenuations change only in the 2 and 6 groups. Each was run, found unseen by
+  every rung, and reasoned out before being noted rather than kept. The faults that
+  stand put the sample a group early, from 14 to 10, and pair tone 1 with the wrong
+  counter.
+- **Quiet stretches.** Passing over quiet stretches whole was the first idea, and it
+  lost (x0.69 on Gunstar). The power-on tone period is 0, which expires every round,
+  so almost no stretch is quiet in a real game.
+- **In the board.** In a megadrive-rust-fast worktree (`external/psgswap`, the
+  dependency pointed at this checkout), md-bench gained x1.075 (Overdrive 2 x1.148).
+  md-trace was 37 of 37 identical to upstream megadrive-rust in the lockstep gate.
+- **Tooling.** `cargo clippy` needs the stable toolchain through `RUSTC`, as above.
+  The plain `cargo` here is 1.93.1, and its clippy is an old nightly that refuses the
+  crate's `rust-version`.
